@@ -1,0 +1,16 @@
+[project]
+name = "bbf"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "equinox>=0.13.2",
+    "ipykernel>=7.1.0",
+    "jupyter>=1.1.1",
+    "lab>=8.5",
+    "minatar",
+]
+
+[tool.uv.sources]
+minatar = { git = "https://github.com/kenjyoung/MinAtar" }
