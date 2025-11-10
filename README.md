@@ -43,6 +43,7 @@ _"RL의 샘플 효율성과 연산 효율성, 두 마리 토끼를 잡는 JAX �
 | **Runner**   | [강동화](www.linkedin.com/in/donghwa-kang-ab37471a2)     | RL을 업무에 활용하려고 하는 사람입니다. | [dhkang8828](https://github.com/dhkang8828) |
 | **Runner**   | [진승정](https://www.linkedin.com/in/seung-jung-jin/)     |  |  |
 | **Runner**   | [김민성](www.linkedin.com/in/minsung-kim-5454b237a)      |  | [mskim46](https://github.com/mskim46)  |
+| **Runner**   | [박영석](https://www.linkedin.com/in/youngseok-bak-041206369/)      |  | [YoungSeokPark](https://github.com/YoungSeokPark)  |
 
 
 ## 🚀 프로젝트 로드맵 (Project Roadmap)
