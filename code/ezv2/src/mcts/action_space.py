@@ -1,8 +1,22 @@
 import abc
 import math
-from typing import Any, Iterable, Sequence
+from dataclasses import dataclass
+from typing import Iterable, Literal, Sequence
 
 import jax.numpy as jnp
+
+@dataclass(frozen=True)
+class ActionSpaceMetadata:
+    """Lightweight description of an action space for diagnostics."""
+
+    kind: Literal["discrete", "continuous"]
+    size: int
+    shape: tuple[int, ...]
+    nvec: tuple[int, ...] | None = None
+    low: jnp.ndarray | None = None
+    high: jnp.ndarray | None = None
+    sampling_number: int | None = None
+
 
 class ActionSpace(abc.ABC):
     """Action space definition for the MCTS."""
@@ -13,6 +27,11 @@ class ActionSpace(abc.ABC):
 
     @abc.abstractmethod
     def get_shape(self) -> tuple[int, ...]:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def metadata(self) -> ActionSpaceMetadata:
+        """Returns a descriptive summary of the action space."""
         raise NotImplementedError
 
 
@@ -44,6 +63,14 @@ class DiscreteActionSpace(ActionSpace):
 
     def get_shape(self) -> tuple[int, ...]:
         return self._shape
+
+    def metadata(self) -> ActionSpaceMetadata:
+        return ActionSpaceMetadata(
+            kind="discrete",
+            size=self._size,
+            shape=self._shape,
+            nvec=self._nvec,
+        )
 
 
 class ContinuousActionSpace(ActionSpace):
@@ -93,3 +120,13 @@ class ContinuousActionSpace(ActionSpace):
 
     def get_sampling_number(self) -> int:
         return self._sampling_number
+
+    def metadata(self) -> ActionSpaceMetadata:
+        return ActionSpaceMetadata(
+            kind="continuous",
+            size=self._sampling_number,
+            shape=self._shape,
+            low=self._low,
+            high=self._high,
+            sampling_number=self._sampling_number,
+        )

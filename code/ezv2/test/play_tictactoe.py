@@ -25,24 +25,21 @@ mcts_policy = importlib.import_module("mcts.policy")
 make_node_class = mcts_node.make_node_class
 MCTSCallbacks = mcts_tree.MCTSCallbacks
 make_tree_class = mcts_tree.make_tree_class
-muzero_policy = mcts_policy.muzero_policy
+search_visit_policy = mcts_policy.search_visit_policy
 
 
 def build_mcts(max_nodes: int = 256) -> Tuple[type, MCTSCallbacks]:
-    embedding_cls = ttt.make_tictactoe_embedding_state()
-    action_space = ttt.make_tictactoe_action_space()
+    simulation = ttt.get_simulation()
+    embedding_cls = simulation.embedding_state_cls
+    action_space = simulation.action_space
+    metadata = action_space.metadata()
+    print(
+        f"[MCTS] action space kind={metadata.kind}, size={metadata.size}, shape={metadata.shape}"
+    )
     node_cls = make_node_class(embedding_cls, action_space)
     tree_cls = make_tree_class(node_cls, max_nodes, action_space.get_shape())
 
-    callbacks = MCTSCallbacks(
-        encode=ttt.encode_state,
-        decode=ttt.decode_state,
-        invalid_actions=lambda state: ttt.mask_invalid_actions(state.board),
-        apply_action=lambda state, action: state.apply_action(int(action)),
-        is_terminal=lambda state: state.is_draw() or state.winner() != 0,
-        transition_reward=ttt.transition_reward,
-        value=ttt.evaluate_state,
-    )
+    callbacks = simulation.make_callbacks()
     return tree_cls, callbacks
 
 
@@ -73,7 +70,7 @@ def prompt_human_action(state: ttt.TicTacToeState) -> int:
 
 def play_game():
     tree_cls, callbacks = build_mcts()
-    state = ttt.TicTacToeState.empty()
+    state = ttt.get_simulation().initial_state()
     rng_key = jax.random.PRNGKey(0)
 
     print("You are X (indices 0-8, row-major). Enter 'q' to quit.\n")
@@ -86,7 +83,7 @@ def play_game():
             print(f"You played {action}")
         else:
             rng_key, subkey = jax.random.split(rng_key)
-            output = muzero_policy(
+            output = search_visit_policy(
                 tree_cls=tree_cls,
                 callbacks=callbacks,
                 root_state=state,

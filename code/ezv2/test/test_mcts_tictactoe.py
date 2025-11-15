@@ -27,27 +27,46 @@ UNVISITED = annotate_mod.UNVISITED
 make_node_class = node_mod.make_node_class
 MCTSCallbacks = tree_mod.MCTSCallbacks
 make_tree_class = tree_mod.make_tree_class
-muzero_policy = policy_mod.muzero_policy
+search_visit_policy = policy_mod.search_visit_policy
 select_action = action_selection_mod.select_action
 
 
 def setup_tree(max_nodes: int = 64) -> Tuple[object, MCTSCallbacks, type]:
-    embedding_cls = ttt.make_tictactoe_embedding_state()
-    action_space = ttt.make_tictactoe_action_space()
+    simulation = ttt.get_simulation()
+    embedding_cls = simulation.embedding_state_cls
+    action_space = simulation.action_space
+    metadata = action_space.metadata()
+    assert metadata.kind == "discrete"
+    assert metadata.size == action_space.get_size()
+    assert metadata.shape == action_space.get_shape()
     node_cls = make_node_class(embedding_cls, action_space)
     tree_cls = make_tree_class(node_cls, max_nodes, action_space.get_shape())
 
-    callbacks = MCTSCallbacks(
-        encode=ttt.encode_state,
-        decode=ttt.decode_state,
-        invalid_actions=lambda state: ttt.mask_invalid_actions(state.board),
-        apply_action=lambda state, action: state.apply_action(action),
-        is_terminal=lambda state: state.is_draw() or state.winner() != 0,
-        transition_reward=ttt.transition_reward,
-        value=ttt.evaluate_state,
-    )
-    tree = tree_cls.from_root(callbacks, ttt.TicTacToeState.empty())
+    callbacks = simulation.make_callbacks()
+    tree = tree_cls.from_root(callbacks, simulation.initial_state())
     return tree, callbacks, tree_cls
+
+
+def test_action_space_metadata_reflects_branching():
+    action_space = ttt.make_tictactoe_action_space()
+    metadata = action_space.metadata()
+    assert metadata.kind == "discrete"
+    assert metadata.size == ttt.NUM_CELLS
+    assert metadata.nvec == (ttt.NUM_CELLS,)
+
+
+def test_action_mask_coercion_validates_shape():
+    _, callbacks, tree_cls = setup_tree(max_nodes=32)
+    state = ttt.TicTacToeState.empty()
+    mask = ttt.mask_invalid_actions(state.board)
+    coerced = tree_cls._coerce_action_mask(mask, context="test")
+    assert coerced.shape == tree_cls._action_shape
+    try:
+        tree_cls._coerce_action_mask(mask[:-1], context="bad-shape")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Expected ValueError for malformed action mask.")
 
 
 def test_reset_masks_invalid_actions():
@@ -89,10 +108,10 @@ def test_ranked_actions_match_visit_sort():
         last_visits = visits
 
 
-def test_muzero_policy_returns_valid_action():
+def test_search_visit_policy_returns_valid_action():
     _, callbacks, tree_cls = setup_tree(max_nodes=64)
     rng = jax.random.PRNGKey(0)
-    output = muzero_policy(
+    output = search_visit_policy(
         tree_cls=tree_cls,
         callbacks=callbacks,
         root_state=ttt.TicTacToeState.empty(),
@@ -102,6 +121,22 @@ def test_muzero_policy_returns_valid_action():
     assert 0 <= output.action < ttt.NUM_CELLS
     assert output.action_weights.shape[0] == ttt.NUM_CELLS
     assert jnp.isclose(jnp.sum(output.action_weights), 1.0, atol=1e-6)
+    assert output.gumbel_extra is None
+
+
+def test_search_visit_policy_can_capture_gumbel_noise():
+    _, callbacks, tree_cls = setup_tree(max_nodes=64)
+    rng = jax.random.PRNGKey(42)
+    output = search_visit_policy(
+        tree_cls=tree_cls,
+        callbacks=callbacks,
+        root_state=ttt.TicTacToeState.empty(),
+        rng_key=rng,
+        num_simulations=4,
+        return_gumbel_noise=True,
+    )
+    assert output.gumbel_extra is not None
+    assert output.gumbel_extra.root_gumbel.shape[0] == ttt.NUM_CELLS
 
 
 def test_select_action_defaults_to_gumbel():
@@ -114,6 +149,22 @@ def test_select_action_defaults_to_gumbel():
         rng_key=jax.random.PRNGKey(123),
     )
     assert 0 <= action < ttt.NUM_CELLS
+
+
+def test_select_action_with_extras_returns_metadata():
+    tree, callbacks, _ = setup_tree(max_nodes=64)
+    tree, _ = tree.run_search(callbacks, num_iterations=6)
+    result = select_action(
+        tree=tree,
+        node_index=ROOT_INDEX,
+        depth=0,
+        rng_key=jax.random.PRNGKey(555),
+        with_extras=True,
+    )
+    assert result.action >= 0
+    assert result.root_invalid_mask is not None
+    if result.gumbel_extra is not None:
+        assert result.gumbel_extra.root_gumbel.shape == result.root_invalid_mask.shape
 
 
 def test_select_action_puct_strategy():

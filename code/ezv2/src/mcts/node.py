@@ -38,7 +38,40 @@ def make_node_class(embedding_state_class: EmbeddingState, action_space: ActionS
         raw_value: FieldDescriptor[jnp.float32, (), 0.0] # raw value of the node / shape: ()
         value: FieldDescriptor[jnp.float32, (), 0.0] # cumulative search value of the node / shape: ()
 
+        def with_model_outputs(
+            self,
+            *,
+            prior_logits: jnp.ndarray | None = None,
+            value: float | jnp.ndarray | None = None,
+        ) -> "Node":
+            """Return a new node whose priors/value reflect model predictions."""
+
+            node = self
+            if prior_logits is not None:
+                logits = self._coerce_prior_logits(prior_logits)
+                node = node.replace(children_prior_logits=logits)
+            if value is not None:
+                val = jnp.asarray(value, dtype=jnp.float32)
+                node = node.replace(raw_value=val, value=val)
+            return node
+
+        @classmethod
+        def _coerce_prior_logits(cls, logits: jnp.ndarray) -> jnp.ndarray:
+            arr = jnp.asarray(logits, dtype=jnp.float32)
+            target_shape = cls._children_shape
+            expected_size = int(jnp.prod(jnp.asarray(target_shape)))
+            if arr.size != expected_size:
+                raise ValueError(
+                    f"Prior logits size {arr.size} does not match action space ({expected_size})."
+                )
+            return arr.reshape(target_shape)
+
+        @classmethod
+        def action_metadata(cls):
+            return getattr(cls, "_action_metadata", None)
+
     setattr(Node, "_embedding_state_cls", embedding_state_class)
     setattr(Node, "_children_shape", children_shape)
     setattr(Node, "_action_space", action_space)
+    setattr(Node, "_action_metadata", action_space.metadata())
     return Node

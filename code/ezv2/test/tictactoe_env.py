@@ -15,9 +15,11 @@ for path in (SRC_PATH, TEST_PATH):
 
 action_space_mod = importlib.import_module("mcts.action_space")
 node_mod = importlib.import_module("mcts.node")
+simulation_mod = importlib.import_module("simulation.base")
 
 DiscreteActionSpace = action_space_mod.DiscreteActionSpace
 make_embedding_state_class = node_mod.make_embedding_state_class
+SimulationModel = simulation_mod.SimulationModel
 
 BOARD_SIZE = 3
 NUM_CELLS = BOARD_SIZE * BOARD_SIZE
@@ -32,16 +34,6 @@ WIN_PATTERNS = (
     (0, 4, 8),
     (2, 4, 6),
 )
-
-
-def make_tictactoe_embedding_state():
-    return make_embedding_state_class(jnp.float32, EMBEDDING_SHAPE)
-
-
-def make_tictactoe_action_space() -> DiscreteActionSpace:
-    return DiscreteActionSpace(NUM_CELLS)
-
-
 @dataclass(frozen=True)
 class TicTacToeState:
     board: jnp.ndarray  # shape: (NUM_CELLS,), values in {-1, 0, 1}
@@ -182,4 +174,67 @@ def _winning_moves(board: jnp.ndarray, player: int) -> set[int]:
         if check_winner(candidate) == player:
             winning.add(idx)
     return winning
+
+
+class TicTacToeSimulation(SimulationModel[TicTacToeState]):
+    """Simulation wrapper exposing TicTacToe as a MuZero-style model."""
+
+    def __init__(self):
+        self._action_space = DiscreteActionSpace(NUM_CELLS)
+        self._embedding_cls = make_embedding_state_class(jnp.float32, EMBEDDING_SHAPE)
+
+    @property
+    def action_space(self) -> DiscreteActionSpace:
+        return self._action_space
+
+    @property
+    def embedding_state_cls(self):
+        return self._embedding_cls
+
+    def initial_state(self) -> TicTacToeState:
+        return TicTacToeState.empty()
+
+    def encode(self, state: TicTacToeState) -> jnp.ndarray:
+        return encode_state(state)
+
+    def decode(self, embedding: jnp.ndarray) -> TicTacToeState:
+        return decode_state(embedding)
+
+    def invalid_actions(self, state: TicTacToeState) -> jnp.ndarray:
+        return mask_invalid_actions(state.board)
+
+    def apply_action(self, state: TicTacToeState, action: int) -> TicTacToeState:
+        return state.apply_action(action)
+
+    def is_terminal(self, state: TicTacToeState) -> bool:
+        return state.is_draw() or state.winner() != 0
+
+    def transition_reward(
+        self, parent_state: TicTacToeState, child_state: TicTacToeState, action: int
+    ) -> float:
+        return transition_reward(parent_state, child_state, action)
+
+    def value(self, state: TicTacToeState) -> float:
+        return evaluate_state(state)
+
+
+_SIMULATION = TicTacToeSimulation()
+
+
+def get_simulation() -> TicTacToeSimulation:
+    """Return the shared TicTacToe simulation model."""
+
+    return _SIMULATION
+
+
+def make_tictactoe_embedding_state():
+    return _SIMULATION.embedding_state_cls
+
+
+def make_tictactoe_action_space() -> DiscreteActionSpace:
+    return _SIMULATION.action_space
+
+
+def make_tictactoe_callbacks():
+    return _SIMULATION.make_callbacks()
 

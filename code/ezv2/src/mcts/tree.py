@@ -1,10 +1,10 @@
 from dataclasses import dataclass
-from typing import Callable, Generic, List, Sequence, Tuple, TypeVar
+from typing import Any, Callable, Generic, List, Sequence, Tuple, TypeVar
 
 import jax.numpy as jnp
 from xtructure import FieldDescriptor, Xtructurable, xtructure_dataclass
 
-from .annotate import NO_PARENT, ROOT_INDEX, UNVISITED
+from .annotate import NO_PARENT, ROOT_INDEX, UNVISITED, has_parent, is_root
 from .node import Node
 
 StateT = TypeVar("StateT")
@@ -26,6 +26,8 @@ class SearchTrace:
     path: Sequence[int]
     expanded_action: int | None
     leaf_value: float
+    started_at_root: bool = False
+    leaf_is_root: bool = False
 
 
 def make_tree_class(node_class: Node, max_nodes: int, action_shape: tuple[int, ...]) -> Xtructurable:
@@ -48,7 +50,10 @@ def make_tree_class(node_class: Node, max_nodes: int, action_shape: tuple[int, .
                 action_from_parent_idx=jnp.array(NO_PARENT, dtype=jnp.int32),
             )
             nodes = tree.nodes.at[ROOT_INDEX].set(root_node)
-            invalid_mask = callbacks.invalid_actions(root_state).astype(jnp.uint8).reshape(cls._action_shape)
+            invalid_mask = cls._coerce_action_mask(
+                callbacks.invalid_actions(root_state),
+                context="callbacks.invalid_actions(root_state)",
+            )
             return tree.replace(
                 nodes=nodes,
                 root_invalid_actions=invalid_mask,
@@ -98,7 +103,15 @@ def make_tree_class(node_class: Node, max_nodes: int, action_shape: tuple[int, .
                 path = [*path, child_idx]
                 leaf_value = callbacks.value(child_state)
             tree = tree._backprop(path, float(leaf_value))
-            trace = SearchTrace(path=tuple(path), expanded_action=expand_action, leaf_value=float(leaf_value))
+            path_root = path[0] if path else ROOT_INDEX
+            leaf_idx = path[-1] if path else ROOT_INDEX
+            trace = SearchTrace(
+                path=tuple(path),
+                expanded_action=expand_action,
+                leaf_value=float(leaf_value),
+                started_at_root=is_root(int(path_root)),
+                leaf_is_root=is_root(int(leaf_idx)),
+            )
             return tree, trace
 
         def _select(
@@ -106,6 +119,9 @@ def make_tree_class(node_class: Node, max_nodes: int, action_shape: tuple[int, .
         ) -> Tuple[List[int], int, int | None, StateT]:
             node_idx = ROOT_INDEX
             path: List[int] = [node_idx]
+
+            if not is_root(node_idx):
+                raise ValueError("Selection phase must be rooted at ROOT_INDEX.")
 
             while True:
                 node = self.nodes[node_idx]
@@ -115,7 +131,10 @@ def make_tree_class(node_class: Node, max_nodes: int, action_shape: tuple[int, .
                 if callbacks.is_terminal(state):
                     return path, node_idx, None, state
 
-                invalid_mask = callbacks.invalid_actions(state).reshape(self._action_shape)
+                invalid_mask = self._coerce_action_mask(
+                    callbacks.invalid_actions(state),
+                    context="callbacks.invalid_actions(state)",
+                )
                 unexplored = jnp.logical_and(invalid_mask == 0, node.children_idx == UNVISITED)
                 if bool(jnp.any(unexplored)):
                     action = int(jnp.argmax(unexplored.astype(jnp.int32)))
@@ -180,7 +199,7 @@ def make_tree_class(node_class: Node, max_nodes: int, action_shape: tuple[int, .
                 tree = tree._update_node(idx, node)
 
                 parent_idx = int(node.parent_idx)
-                if parent_idx != NO_PARENT:
+                if has_parent(parent_idx):
                     parent = tree.nodes[parent_idx]
                     action = int(node.action_from_parent_idx)
                     parent = parent.replace(
@@ -203,6 +222,71 @@ def make_tree_class(node_class: Node, max_nodes: int, action_shape: tuple[int, .
         def _update_node(self, idx: int, node: Node) -> "Tree":
             nodes = self.nodes.at[idx].set(node)
             return self.replace(nodes=nodes)
+
+        @classmethod
+        def action_metadata(cls):
+            """Expose the action-space metadata baked into the node class."""
+
+            return getattr(cls._node_class, "_action_metadata", None)
+
+        @classmethod
+        def describe_action_space(cls) -> dict[str, Any] | None:
+            """Return action metadata in a logging-friendly format."""
+
+            metadata = cls.action_metadata()
+            if metadata is None:
+                return None
+            return {
+                "kind": metadata.kind,
+                "size": int(metadata.size),
+                "shape": tuple(int(dim) for dim in metadata.shape),
+                "nvec": tuple(int(dim) for dim in metadata.nvec) if metadata.nvec else None,
+                "low": metadata.low.tolist() if metadata.low is not None else None,
+                "high": metadata.high.tolist() if metadata.high is not None else None,
+                "sampling_number": metadata.sampling_number,
+            }
+
+        def telemetry_snapshot(self) -> dict[str, Any]:
+            """Expose high-level telemetry for logging/monitoring."""
+
+            return {
+                "max_nodes": int(self._max_nodes),
+                "allocated_nodes": int(self.next_free_idx),
+                "action_space": self.describe_action_space(),
+            }
+
+        def describe_trace(self, trace: SearchTrace) -> dict[str, Any]:
+            """Convert a SearchTrace into telemetry-friendly data."""
+
+            path = tuple(int(idx) for idx in trace.path)
+            return {
+                "path": path,
+                "path_length": len(path),
+                "expanded_action": trace.expanded_action,
+                "leaf_value": trace.leaf_value,
+                "started_at_root": trace.started_at_root,
+                "leaf_is_root": trace.leaf_is_root,
+            }
+
+        @classmethod
+        def _expected_action_size(cls) -> int:
+            metadata = cls.action_metadata()
+            if metadata is not None:
+                return int(metadata.size)
+            return int(jnp.prod(jnp.asarray(cls._action_shape)))
+
+        @classmethod
+        def _coerce_action_mask(
+            cls, mask: jnp.ndarray, *, context: str = "action mask"
+        ) -> jnp.ndarray:
+            arr = jnp.asarray(mask, dtype=jnp.uint8)
+            expected_size = cls._expected_action_size()
+            if arr.size != expected_size:
+                raise ValueError(
+                    f"{context} produced size {arr.size}, expected {expected_size} "
+                    f"(shape {cls._action_shape})."
+                )
+            return jnp.reshape(arr, cls._action_shape)
 
     setattr(Tree, "_node_class", node_class)
     setattr(Tree, "_action_shape", action_shape)

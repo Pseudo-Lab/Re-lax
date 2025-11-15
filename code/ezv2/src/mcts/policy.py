@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 from xtructure import Xtructurable
 
+from .action_selection import GumbelMuZeroExtraData
 from .annotate import ROOT_INDEX
 from .tree import MCTSCallbacks, SearchTrace
 
@@ -23,9 +24,10 @@ class PolicyOutput:
     action_weights: jnp.ndarray
     tree: Xtructurable
     traces: Sequence[SearchTrace]
+    gumbel_extra: Optional[GumbelMuZeroExtraData] = None
 
 
-def muzero_policy(
+def search_visit_policy(
     tree_cls: Type[TreeType],
     callbacks: MCTSCallbacks,
     root_state,
@@ -37,8 +39,9 @@ def muzero_policy(
     temperature: float = 1.0,
     dirichlet_fraction: float = 0.0,
     dirichlet_alpha: float = 0.3,
+    return_gumbel_noise: bool = False,
 ) -> PolicyOutput:
-    """Runs a lightweight MuZero-style search on the local tree abstraction.
+    """Run local tree search and sample an action from visit-count weights.
 
     Args:
         tree_cls: Tree class produced by :func:`make_tree_class`.
@@ -56,10 +59,7 @@ def muzero_policy(
         PolicyOutput containing the selected action, action weights, and tree.
     """
 
-    tree = tree_cls.from_root(callbacks, root_state)
-    if invalid_actions is not None:
-        tree = tree.replace(root_invalid_actions=_coerce_invalid_mask(tree, invalid_actions))
-
+    tree = _initialize_tree(tree_cls, callbacks, root_state, invalid_actions)
     tree, traces = tree.run_search(callbacks, num_iterations=num_simulations, discount=discount)
     root = tree.nodes[ROOT_INDEX]
 
@@ -67,26 +67,84 @@ def muzero_policy(
     visit_counts = jnp.asarray(root.children_visits, dtype=jnp.float32)
     action_weights = _normalize_visit_counts(visit_counts, mask)
 
-    if dirichlet_fraction > 0.0:
-        rng_key, noise_key = jax.random.split(rng_key)
-        action_weights = _add_dirichlet_noise(
-            noise_key,
-            action_weights,
-            dirichlet_alpha=dirichlet_alpha,
-            dirichlet_fraction=dirichlet_fraction,
-        )
+    rng_key, action_weights = _maybe_apply_dirichlet_noise(
+        rng_key,
+        action_weights,
+        dirichlet_fraction=dirichlet_fraction,
+        dirichlet_alpha=dirichlet_alpha,
+    )
 
     logits = _get_logits_from_probs(action_weights)
     logits = _apply_temperature(logits, temperature)
 
-    if temperature <= 1e-6:
-        action = int(jnp.argmax(logits))
-    else:
-        rng_key, sample_key = jax.random.split(rng_key)
-        action = int(jax.random.categorical(sample_key, logits))
+    action, rng_key, gumbel_extra = _sample_action_from_logits(
+        logits,
+        rng_key=rng_key,
+        temperature=temperature,
+        capture_gumbel_noise=return_gumbel_noise,
+    )
 
     action_weights = jax.nn.softmax(logits)
-    return PolicyOutput(action=action, action_weights=action_weights, tree=tree, traces=traces)
+    return PolicyOutput(
+        action=action,
+        action_weights=action_weights,
+        tree=tree,
+        traces=traces,
+        gumbel_extra=gumbel_extra,
+    )
+
+
+# Backwards compatibility alias
+muzero_policy = search_visit_policy
+def _initialize_tree(
+    tree_cls: Type[TreeType],
+    callbacks: MCTSCallbacks,
+    root_state,
+    invalid_actions: Optional[jnp.ndarray],
+) -> TreeType:
+    tree = tree_cls.from_root(callbacks, root_state)
+    if invalid_actions is not None:
+        mask = _coerce_invalid_mask(
+            tree_cls, invalid_actions, context="search_visit_policy.invalid_actions_override"
+        )
+        tree = tree.replace(root_invalid_actions=mask)
+    return tree
+
+
+def _maybe_apply_dirichlet_noise(
+    rng_key: jax.Array,
+    action_weights: jnp.ndarray,
+    *,
+    dirichlet_fraction: float,
+    dirichlet_alpha: float,
+) -> Tuple[jax.Array, jnp.ndarray]:
+    if dirichlet_fraction <= 0.0:
+        return rng_key, action_weights
+    rng_key, noise_key = jax.random.split(rng_key)
+    noisy = _add_dirichlet_noise(
+        noise_key,
+        action_weights,
+        dirichlet_alpha=dirichlet_alpha,
+        dirichlet_fraction=dirichlet_fraction,
+    )
+    return rng_key, noisy
+
+
+def _sample_action_from_logits(
+    logits: jnp.ndarray,
+    *,
+    rng_key: jax.Array,
+    temperature: float,
+    capture_gumbel_noise: bool,
+) -> Tuple[int, jax.Array, Optional[GumbelMuZeroExtraData]]:
+    if temperature <= 1e-6:
+        return int(jnp.argmax(logits)), rng_key, None
+
+    rng_key, gumbel_key = jax.random.split(rng_key)
+    gumbel = jax.random.gumbel(gumbel_key, logits.shape, dtype=logits.dtype)
+    action = int(jnp.argmax(logits + gumbel))
+    extra = GumbelMuZeroExtraData(root_gumbel=gumbel) if capture_gumbel_noise else None
+    return action, rng_key, extra
 
 
 def _normalize_visit_counts(counts: jnp.ndarray, invalid_mask: jnp.ndarray) -> jnp.ndarray:
@@ -135,15 +193,18 @@ def _add_dirichlet_noise(
     return (1.0 - dirichlet_fraction) * probs + dirichlet_fraction * noise
 
 
-def _coerce_invalid_mask(tree: Xtructurable, invalid_actions: jnp.ndarray) -> jnp.ndarray:
-    mask = jnp.asarray(invalid_actions, dtype=jnp.uint8)
-    mask = jnp.reshape(mask, tree.root_invalid_actions.shape)
-    return mask
+def _coerce_invalid_mask(
+    tree_cls: Type[TreeType], invalid_actions: jnp.ndarray, *, context: str
+) -> jnp.ndarray:
+    return tree_cls._coerce_action_mask(invalid_actions, context=context)
 
 
 def _resolve_invalid_mask(tree: Xtructurable, override: Optional[jnp.ndarray]) -> jnp.ndarray:
     base_mask = tree.root_invalid_actions.astype(bool)
     if override is None:
         return base_mask
-    override_mask = jnp.asarray(override, dtype=bool).reshape(base_mask.shape)
+    tree_cls = type(tree)
+    override_mask = _coerce_invalid_mask(
+        tree_cls, override, context="search_visit_policy.invalid_actions_runtime"
+    ).astype(bool)
     return jnp.logical_or(base_mask, override_mask)
