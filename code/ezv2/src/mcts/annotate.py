@@ -1,0 +1,4 @@
+
+ROOT_INDEX = 0
+NO_PARENT = -1
+UNVISITED = -1
