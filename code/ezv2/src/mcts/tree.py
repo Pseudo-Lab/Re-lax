@@ -10,6 +10,7 @@ from .node import Node
 
 StateT = TypeVar("StateT")
 
+MAX_SEARCH_DEPTH = 128  # Maximum depth for search trace/path. Increase if game is very deep.
 
 @dataclass(frozen=True)
 class MCTSCallbacks(Generic[StateT]):
@@ -23,20 +24,14 @@ class MCTSCallbacks(Generic[StateT]):
     policy: Callable[[StateT], jnp.ndarray]
 
 
-@dataclass(frozen=True)
-class SearchTrace:
-    path: jnp.ndarray # Changed from Sequence[int] to jnp.ndarray for JIT/Scan
-    expanded_action: int | None
-    leaf_value: float
-    started_at_root: bool = False
-    leaf_is_root: bool = False
+@xtructure_dataclass
+class SearchTrace(Xtructurable):
+    path: FieldDescriptor[jnp.int32, (MAX_SEARCH_DEPTH,), NO_PARENT]
+    expanded_action: FieldDescriptor[jnp.int32, (), -1]
+    leaf_value: FieldDescriptor[jnp.float32, (), 0.0]
+    started_at_root: FieldDescriptor[jnp.bool_, (), False]
+    leaf_is_root: FieldDescriptor[jnp.bool_, (), False]
 
-# Register SearchTrace as a Pytree
-jax.tree_util.register_pytree_node(
-    SearchTrace,
-    lambda s: ((s.path, s.expanded_action, s.leaf_value, s.started_at_root, s.leaf_is_root), None),
-    lambda _, children: SearchTrace(*children)
-)
 
 
 
@@ -163,7 +158,7 @@ def make_tree_class(node_class: Node, max_nodes: int, action_shape: tuple[int, .
             
             trace = SearchTrace(
                 path=final_path_arr, # Pass array directly
-                expanded_action=jax.lax.select(expand_action == -1, -1, expand_action),
+                expanded_action=jax.lax.select(expand_action == -1, jnp.int32(-1), expand_action),
                 leaf_value=leaf_value,
                 started_at_root=is_root(path_root),
                 leaf_is_root=is_root(final_leaf_idx),
@@ -179,8 +174,8 @@ def make_tree_class(node_class: Node, max_nodes: int, action_shape: tuple[int, .
             # Given the tree depth is bounded by max_nodes (or practically much less),
             # we can use a fixed size array for path.
             
-            MAX_DEPTH = 64 # Sufficient for TicTacToe and many small games
-            path_arr = jnp.full((MAX_DEPTH,), NO_PARENT, dtype=jnp.int32)
+            # MAX_SEARCH_DEPTH defined at module level
+            path_arr = jnp.full((MAX_SEARCH_DEPTH,), NO_PARENT, dtype=jnp.int32)
             path_arr = path_arr.at[0].set(ROOT_INDEX)
             path_len = 1
             
