@@ -19,9 +19,9 @@ class ResidualBlock(eqx.Module):
         key1, key2 = jax.random.split(key)
         padding = (kernel_size - 1) // 2
         self.conv1 = eqx.nn.Conv2d(channels, channels, kernel_size, stride=stride, padding=padding, use_bias=False, key=key1)
-        self.bn1 = eqx.nn.BatchNorm(channels, axis_name="batch")
+        self.bn1 = eqx.nn.BatchNorm(channels, axis_name="batch", mode="batch")
         self.conv2 = eqx.nn.Conv2d(channels, channels, kernel_size, stride=1, padding=padding, use_bias=False, key=key2)
-        self.bn2 = eqx.nn.BatchNorm(channels, axis_name="batch")
+        self.bn2 = eqx.nn.BatchNorm(channels, axis_name="batch", mode="batch")
 
     def __call__(self, x: jnp.ndarray, state: eqx.nn.State) -> tuple[jnp.ndarray, eqx.nn.State]:
         out, state = self.bn1(self.conv1(x), state)
@@ -40,7 +40,7 @@ class MLP(eqx.Module):
         key: jax.Array
     ):
         keys = jax.random.split(key, len(hidden_sizes) + 1)
-        sizes = [in_size] + list(hidden_sizes) + [out_size]
+        sizes = [int(in_size)] + [int(h) for h in hidden_sizes] + [int(out_size)]
         
         self.layers = []
         for i in range(len(sizes) - 1):
