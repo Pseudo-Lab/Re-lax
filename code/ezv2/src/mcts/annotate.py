@@ -14,10 +14,10 @@ UNVISITED = -1
 def is_root(index: int) -> bool:
     """Returns True when `index` refers to the root node."""
 
-    return int(index) == ROOT_INDEX
+    return index == ROOT_INDEX
 
 
 def has_parent(index: int) -> bool:
     """Returns True when the node has a parent (i.e., is not the root)."""
 
-    return int(index) != NO_PARENT
+    return index != NO_PARENT

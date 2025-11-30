@@ -76,6 +76,12 @@ def play_game():
     print("You are X (indices 0-8, row-major). Enter 'q' to quit.\n")
     render_board(state)
 
+    # JIT compile the policy function
+    jit_search_policy = jax.jit(
+        search_visit_policy, 
+        static_argnames=("tree_cls", "callbacks", "num_simulations", "return_gumbel_noise")
+    )
+
     while True:
         if state.current_player == 1:
             action = prompt_human_action(state)
@@ -83,15 +89,19 @@ def play_game():
             print(f"You played {action}")
         else:
             rng_key, subkey = jax.random.split(rng_key)
-            output = search_visit_policy(
+            # Increase simulations for stronger play
+            # Lower temperature (e.g. 0.1 or 0.0) makes it play more greedily w.r.t visit counts
+            output = jit_search_policy(
                 tree_cls=tree_cls,
                 callbacks=callbacks,
                 root_state=state,
                 rng_key=subkey,
-                num_simulations=32,
+                num_simulations=200,
+                temperature=0.1, 
             )
             state = state.apply_action(output.action)
-            print(f"AI played {output.action}")
+            # Note: JITted function returns JAX arrays, so we might see DeviceArray in print
+            print(f"AI played {output.action} (visits: {output.action_weights})")
 
         render_board(state)
 

@@ -54,6 +54,10 @@ class SimulationModel(ABC, Generic[StateT]):
         """Return the environment reward for the transition parent->child via action."""
 
     @abstractmethod
+    def policy(self, state: StateT) -> jnp.ndarray:
+        """Return the policy logits for the given state."""
+
+    @abstractmethod
     def value(self, state: StateT) -> float:
         """Heuristic/value estimate for leaf evaluation."""
 
@@ -68,5 +72,6 @@ class SimulationModel(ABC, Generic[StateT]):
             is_terminal=self.is_terminal,
             transition_reward=self.transition_reward,
             value=self.value,
+            policy=self.policy,
         )
 

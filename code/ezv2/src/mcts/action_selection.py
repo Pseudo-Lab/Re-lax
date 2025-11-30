@@ -136,6 +136,14 @@ class GumbelMuZeroExtraData:
 
     root_gumbel: jnp.ndarray
 
+# Register GumbelMuZeroExtraData as a Pytree
+jax.tree_util.register_pytree_node(
+    GumbelMuZeroExtraData,
+    lambda s: ((s.root_gumbel,), None),
+    lambda _, children: GumbelMuZeroExtraData(children[0])
+)
+
+
 
 def gumbel_muzero_action_selection(
     *,

@@ -23,8 +23,16 @@ class PolicyOutput:
     action: int
     action_weights: jnp.ndarray
     tree: Xtructurable
-    traces: Sequence[SearchTrace]
+    traces: SearchTrace
     gumbel_extra: Optional[GumbelMuZeroExtraData] = None
+
+# Register PolicyOutput as a Pytree
+jax.tree_util.register_pytree_node(
+    PolicyOutput,
+    lambda s: ((s.action, s.action_weights, s.tree, s.traces, s.gumbel_extra), None),
+    lambda _, children: PolicyOutput(*children)
+)
+
 
 
 def search_visit_policy(
@@ -137,14 +145,101 @@ def _sample_action_from_logits(
     temperature: float,
     capture_gumbel_noise: bool,
 ) -> Tuple[int, jax.Array, Optional[GumbelMuZeroExtraData]]:
-    if temperature <= 1e-6:
-        return int(jnp.argmax(logits)), rng_key, None
+    
+    # We use lax.cond for branching, but we must ensure return types match.
+    # extra is Optional[GumbelMuZeroExtraData]. In JIT, Optional is not really supported for varying branches.
+    # Both branches must return same Pytree structure.
+    # So if capture_gumbel_noise is True, greedy branch must also return a dummy GumbelMuZeroExtraData or None?
+    # Actually capture_gumbel_noise is static (bool), so we can use python if for that part?
+    # No, capture_gumbel_noise is passed as arg. If it's static in JIT, we are fine.
+    # In play_tictactoe.py, return_gumbel_noise is static_argnames? Let's check.
+    # Yes, 'return_gumbel_noise' is in static_argnames.
+    # But wait, _sample_action_from_logits is called with capture_gumbel_noise=return_gumbel_noise.
+    # So capture_gumbel_noise is static boolean.
+    
+    # However, temperature is NOT static in the call from search_visit_policy (it's passed as arg).
+    # So temperature check needs lax.cond.
+    
+    # If capture_gumbel_noise is True, we need to return extra data in both branches.
+    # If False, both return None.
+    
+    def _sample(key):
+        # Gumbel noise
+        new_key, gumbel_key = jax.random.split(key)
+        gumbel = jax.random.gumbel(gumbel_key, logits.shape, dtype=logits.dtype)
+        
+        # If temp is tiny, we just do argmax (effectively gumbel with 0 scale or pure argmax)
+        # But we need to implement the branching logic correctly.
+        # Argmax(logits) is equivalent to Argmax(logits + 0*gumbel)
+        
+        # Let's just use the Gumbel-Max trick formula:
+        # action = argmax(logits + gumbel)
+        # But if temp is near 0, we want argmax(logits).
+        
+        # Correct logic:
+        # If temp > 0: sampling ~ Softmax(logits/temp)
+        # If temp == 0: argmax(logits)
+        
+        # For standard sampling we often use Gumbel-Max trick on logits/temp?
+        # search_visit_policy calls _apply_temperature BEFORE calling this.
+        # So logits here are already scaled (logits/temp).
+        # So we just need argmax(logits + gumbel).
+        
+        # Wait, if temp -> 0, logits -> infinity. _apply_temperature handles this?
+        # _apply_temperature divides by max(tiny, temperature).
+        # If temp is small, logits are huge. Gumbel noise becomes negligible.
+        # So argmax(logits + gumbel) converges to argmax(logits).
+        
+        # So we actually don't strictly NEED the `if temp <= 1e-6` branch for correctness,
+        # BUT we might want it for determinism or avoiding huge numbers.
+        # However, huge numbers are fine in float32 usually.
+        
+        # The issue in the traceback was `if temperature <= 1e-6`.
+        # We can replace this with `jax.lax.cond`.
+        
+        pass
 
-    rng_key, gumbel_key = jax.random.split(rng_key)
-    gumbel = jax.random.gumbel(gumbel_key, logits.shape, dtype=logits.dtype)
-    action = int(jnp.argmax(logits + gumbel))
-    extra = GumbelMuZeroExtraData(root_gumbel=gumbel) if capture_gumbel_noise else None
-    return action, rng_key, extra
+    # Refined implementation using lax.cond
+    
+    def _greedy(_):
+        action = jnp.argmax(logits).astype(jnp.int32)
+        # Return dummy extra if needed?
+        # If capture_gumbel_noise is True, we need to return something matching the structure.
+        # If we are in JIT, we can't return None in one branch and object in another unless they are compatible.
+        # If capture_gumbel_noise is False, both return None. Fine.
+        # If True, stochastic returns object. Greedy must return object too?
+        # Usually we just return None for extra in greedy? 
+        # But lax.cond requires same structure.
+        
+        # Let's check if we can assume capture_gumbel_noise is False for now (default).
+        # In play_tictactoe, it defaults to False.
+        
+        extra = None
+        if capture_gumbel_noise:
+             # Create dummy zeros
+             extra = GumbelMuZeroExtraData(root_gumbel=jnp.zeros_like(logits))
+             
+        return action, rng_key, extra
+
+    def _stochastic(_):
+        new_rng_key, gumbel_key = jax.random.split(rng_key)
+        gumbel = jax.random.gumbel(gumbel_key, logits.shape, dtype=logits.dtype)
+        # Logits are already temperature scaled.
+        action = jnp.argmax(logits + gumbel).astype(jnp.int32)
+        
+        extra = None
+        if capture_gumbel_noise:
+            extra = GumbelMuZeroExtraData(root_gumbel=gumbel)
+            
+        return action, new_rng_key, extra
+
+    # Since temperature is a Tracer, we use lax.cond
+    return jax.lax.cond(
+        temperature <= 1e-6,
+        _greedy,
+        _stochastic,
+        operand=None
+    )
 
 
 def _normalize_visit_counts(counts: jnp.ndarray, invalid_mask: jnp.ndarray) -> jnp.ndarray:
