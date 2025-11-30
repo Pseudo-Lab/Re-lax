@@ -9,8 +9,9 @@ dependencies = [
     "equinox",
     "optax",
     "flashbax",
-    "gymnasium",
-    "numpy",
+    "gymnasium[atari,accept-rom-license]",
+    "ale-py",
+    "opencv-python-headless",
     "wandb",
     "aim",
     "xtructure @ git+https://github.com/tinker495/xtructure.git"
