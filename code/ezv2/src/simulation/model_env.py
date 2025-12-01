@@ -4,8 +4,8 @@ import equinox as eqx
 from typing import Tuple, Type, Any
 from xtructure import Xtructurable, FieldDescriptor, xtructure_dataclass
 
-from ..model.efficientzero import EfficientZero
-from ..mcts.action_space import ActionSpace
+from model.efficientzero import EfficientZero
+from mcts.action_space import ActionSpace
 from .base import SimulationModel
 
 def logits_to_scalar(logits: jnp.ndarray, support_size: int) -> float:
